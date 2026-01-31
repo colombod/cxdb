@@ -30,10 +30,8 @@ jobs:
           sed -i 's/your-client-secret/test-client-secret/g' .env
           sed -i 's/example.com/localhost/g' .env
           sed -i 's/your-64-character-hex-secret-here/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/g' .env
-          # Override images to use locally built ones
-          sed -i 's|build: ../..|image: cxdb/cxdb:test|g' docker-compose.yml
-          sed -i 's|gateway/Dockerfile|cxdb/gateway:test|g' docker-compose.yml
-          docker compose up -d
+          # Use test compose file with pre-built images
+          docker compose -f docker-compose.test.yml up -d
 
       - name: Wait for services to be healthy
         run: |
@@ -60,8 +58,8 @@ jobs:
         run: |
           mkdir -p logs
           cd deploy/docker-compose
-          docker compose logs cxdb-server > ../../logs/server.log
-          docker compose logs cxdb-gateway > ../../logs/gateway.log
+          docker compose -f docker-compose.test.yml logs cxdb-server > ../../logs/server.log
+          docker compose -f docker-compose.test.yml logs cxdb-gateway > ../../logs/gateway.log
 
       - name: Upload logs
         if: always()
@@ -75,4 +73,4 @@ jobs:
         if: always()
         run: |
           cd deploy/docker-compose
-          docker compose down -v
+          docker compose -f docker-compose.test.yml down -v
