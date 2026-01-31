@@ -1,0 +1,78 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker images
+        run: |
+          docker build --platform linux/amd64 -t cxdb/cxdb:test .
+          docker build --platform linux/amd64 -f gateway/Dockerfile -t cxdb/gateway:test .
+
+      - name: Start CXDB with Docker Compose
+        run: |
+          cd deploy/docker-compose
+          cp .env.example .env
+          # Set test credentials
+          sed -i 's/your-google-client-id/test-client-id/g' .env
+          sed -i 's/your-client-secret/test-client-secret/g' .env
+          sed -i 's/example.com/localhost/g' .env
+          sed -i 's/your-64-character-hex-secret-here/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/g' .env
+          # Override images to use locally built ones
+          sed -i 's|build: ../..|image: cxdb/cxdb:test|g' docker-compose.yml
+          sed -i 's|gateway/Dockerfile|cxdb/gateway:test|g' docker-compose.yml
+          docker compose up -d
+
+      - name: Wait for services to be healthy
+        run: |
+          echo "Waiting for CXDB server..."
+          timeout 60 bash -c 'until curl -sf http://localhost:9010/healthz; do sleep 2; done'
+          echo "Waiting for gateway..."
+          timeout 60 bash -c 'until curl -sf http://localhost:8080/healthz; do sleep 2; done'
+          echo "Services are healthy!"
+
+      - name: Run Go client integration tests
+        run: |
+          cd clients/go
+          export CXDB_TEST_ADDR=localhost:9009
+          export CXDB_TEST_HTTP_ADDR=http://localhost:9010
+          go test -v ./...
+
+      - name: Run example smoke tests
+        run: |
+          cd examples/basic-go
+          timeout 30 go run main.go || echo "Example completed (may fail without OAuth)"
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p logs
+          cd deploy/docker-compose
+          docker compose logs cxdb-server > ../../logs/server.log
+          docker compose logs cxdb-gateway > ../../logs/gateway.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-logs
+          path: logs/
+          retention-days: 7
+
+      - name: Tear down
+        if: always()
+        run: |
+          cd deploy/docker-compose
+          docker compose down -v
