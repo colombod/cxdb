@@ -103,12 +103,19 @@ export async function expectDebuggerError(page: Page, errorText?: string): Promi
 }
 
 /**
- * Navigate to a context via URL routing.
- * The UI uses URL-based routing: /c/{contextId} for contexts.
+ * Open a context by clicking on it in the context list.
+ * This first refreshes the page to load the latest contexts.
  */
 export async function addContext(page: Page, contextId: string | number): Promise<void> {
-  // Navigate to the context URL and wait for network to be idle
-  await page.goto(`/c/${contextId}`, { waitUntil: 'networkidle' });
+  // Reload the page to ensure the context list is fresh
+  await page.reload({ waitUntil: 'networkidle' });
+
+  // Wait for the context to appear in the list
+  const contextItem = page.locator(`[data-context-id="${contextId}"]`);
+  await expect(contextItem).toBeVisible({ timeout: 10000 });
+
+  // Click on the context to open it
+  await contextItem.click();
 }
 
 /**

@@ -78,6 +78,7 @@ const ContextListItem = memo(function ContextListItem({
     <button
       ref={itemRef}
       onClick={onSelect}
+      data-context-id={context.context_id}
       className={cn(
         'w-full text-left px-3 py-2.5 border-b border-theme-border-dim/60 transition-all group',
         isSelected
