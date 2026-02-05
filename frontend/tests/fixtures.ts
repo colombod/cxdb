@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { test as base, Page } from '@playwright/test';
-import { startServer, stopServer, ServerHandle } from './utils/server';
+import { startServer, stopServer, ServerHandle, useExternalServer } from './utils/server';
 import {
   createContext,
   appendTurn,
@@ -115,11 +115,36 @@ export const test = base.extend<TestFixtures>({
   /**
    * Page fixture with API routes intercepted and redirected to the test server.
    * Use this instead of the built-in `page` fixture for tests that need API access.
+   *
+   * When using external servers (CI mode with Docker Compose), route interception
+   * is skipped because:
+   * 1. Next.js proxy already routes to port 9010 (same as external server)
+   * 2. Route interception breaks SSE connections (/v1/events) because fetch
+   *    cannot properly forward streaming responses
    */
   apiPage: async ({ page, cxdbServer }, use) => {
-    // Intercept all /v1/* requests and redirect them to the test server
+    // Skip route interception when using external servers (CI mode)
+    // The Next.js dev server proxy already routes to the correct port
+    if (useExternalServer()) {
+      await use(page);
+      return;
+    }
+
+    // In local development, we need to intercept routes because the Next.js proxy
+    // goes to hardcoded port 9010, but our test server is on a random port.
+    //
+    // Skip intercepting /v1/events (SSE endpoint) because fetch can't handle
+    // streaming responses properly. This means SSE won't work in local tests,
+    // but context creation/viewing still works via REST API polling.
     await page.route('**/v1/**', async (route) => {
       const url = route.request().url();
+
+      // Don't intercept SSE event streams - they need true streaming support
+      if (url.includes('/v1/events')) {
+        await route.continue();
+        return;
+      }
+
       // Replace the origin with the test server
       const testUrl = url.replace(/http:\/\/[^\/]+\/v1/, `http://127.0.0.1:${cxdbServer.httpPort}/v1`);
 
