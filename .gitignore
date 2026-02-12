@@ -151,6 +151,9 @@ build/
 
 # Ignore evidence directories from internal workflow
 .scratch/
+.tmp-cxdb-srcdata/
+frontend/playwright-report/
+frontend/test-results/
 
 # Built binaries at repo root
 /cxdb-writer
