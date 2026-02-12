@@ -838,6 +838,7 @@ fn alpha(dt: f64, window_seconds: f64) -> f64 {
 /// counts by f_bsize instead of f_frsize, which inflates values by 256x on
 /// VirtioFS mounts (Docker Desktop) where f_bsize=1MiB but f_frsize=4KiB.
 #[cfg(unix)]
+#[allow(clippy::unnecessary_cast)] // statvfs fields are u32 on macOS, u64 on Linux
 fn disk_space_for_path(path: &Path) -> (u64, u64) {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
