@@ -7,7 +7,7 @@ import { cn, trunc, safeStringify, formatTime, contentPreview } from '@/lib/util
 import { fetchTurns, fetchFsDirectory, ApiError } from '@/lib/api';
 import { FileBrowser } from './FileBrowser';
 import { FileViewer } from './FileViewer';
-import { TryRenderCanonical, isConversationItem } from './ConversationRenderer';
+import { TryRenderCanonical, isConversationItem, NavigationContext } from './ConversationRenderer';
 import { MessageRenderer, isAgentMessage, extractMessageText } from './MessageRenderer';
 import { QuestEventRenderer, QuestSnapshotRenderer, isQuestEvent, isQuestSnapshot } from './QuestRenderer';
 import { FallbackRenderer } from './FallbackRenderer';
@@ -830,6 +830,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
         </div>
 
         {/* Body */}
+        <NavigationContext.Provider value={{ onNavigateToContext }}>
         <div className="h-[calc(100%-3rem)] flex">
           {/* Left: Turn list - more compact */}
           <div className="w-80 border-r border-theme-border bg-theme-bg-secondary/40 flex flex-col">
@@ -1103,6 +1104,7 @@ export function ContextDebugger({ contextId, isOpen, onClose, lastEvent, initial
             )}
           </div>
         </div>
+        </NavigationContext.Provider>
       </div>
     </div>
   );
