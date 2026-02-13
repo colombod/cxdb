@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { createContext, useContext, useState } from 'react';
 import type {
   ConversationItem,
   ItemType,
@@ -38,7 +38,55 @@ import {
   Clock,
   Loader2,
   ArrowRight,
+  ExternalLink,
 } from './icons';
+
+// ============================================================================
+// Navigation Context (avoids prop drilling for context links)
+// ============================================================================
+
+interface NavigationContextType {
+  onNavigateToContext?: (contextId: string) => void;
+}
+
+export const NavigationContext = createContext<NavigationContextType>({});
+
+export function useNavigation() {
+  return useContext(NavigationContext);
+}
+
+// ============================================================================
+// Description with Context Links (parses child_context_id=N patterns)
+// ============================================================================
+
+function DescriptionWithContextLinks({ description }: { description: string }) {
+  const { onNavigateToContext } = useNavigation();
+
+  // Parse child_context_id=N patterns
+  const contextIdMatch = description.match(/child_context_id=(\d+)/);
+  if (!contextIdMatch || !onNavigateToContext) {
+    return <>{description}</>;
+  }
+
+  const contextId = contextIdMatch[1];
+  const beforeMatch = description.substring(0, contextIdMatch.index);
+  const afterMatch = description.substring(contextIdMatch.index! + contextIdMatch[0].length);
+
+  return (
+    <>
+      {beforeMatch}
+      <button
+        onClick={() => onNavigateToContext(contextId)}
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-theme-bg-tertiary hover:bg-theme-bg-hover rounded text-xs font-mono text-theme-accent transition-colors"
+        title={`Navigate to child context #${contextId}`}
+      >
+        <ExternalLink className="w-3 h-3" />
+        #{contextId}
+      </button>
+      {afterMatch}
+    </>
+  );
+}
 
 // ============================================================================
 // Type Icon Component
@@ -287,10 +335,10 @@ function ToolCallItemRenderer({ data }: { data: ToolCallItem }) {
         </div>
       </div>
 
-      {/* Description */}
+      {/* Description (with clickable context links) */}
       {data.description && (
         <div className="px-3 py-2 text-sm text-theme-text-secondary bg-theme-bg-secondary/30 border-b border-theme-border/30">
-          {data.description}
+          <DescriptionWithContextLinks description={data.description} />
         </div>
       )}
 
@@ -452,10 +500,10 @@ function LegacyToolCallRenderer({ data }: { data: ToolCallData }) {
         <span className="text-xs text-theme-text-dim font-mono">{data.call_id}</span>
       </div>
 
-      {/* Description */}
+      {/* Description (with clickable context links) */}
       {data.description && (
         <div className="px-3 py-2 text-sm text-theme-text-secondary bg-theme-bg-secondary/30 border-b border-theme-border/30">
-          {data.description}
+          <DescriptionWithContextLinks description={data.description} />
         </div>
       )}
 
