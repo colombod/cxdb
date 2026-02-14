@@ -4,16 +4,19 @@
  * These types mirror the Go types in clients/go/types/ and provide
  * a well-defined schema that the frontend can render with certainty.
  *
- * Schema version 2 introduces:
+ * Schema version 3 introduces:
  * - assistant_turn: Nested tool calls within assistant responses
  * - handoff: Agent-to-agent transitions
+ * - raw_request/raw_response on AssistantTurn
+ * - provider/request_id on TurnMetrics
+ * - pending_approval tool call status
  *
  * Legacy types (assistant, tool_call, tool_result) are kept for backward compatibility.
  */
 
-// Type ID constants matching the Go package
-export const TYPE_ID_CONVERSATION_ITEM = 'cxdb:ConversationItem';
-export const TYPE_VERSION_CONVERSATION_ITEM = 2;
+// Type ID constants matching the registry bundle
+export const TYPE_ID_CONVERSATION_ITEM = 'cxdb.ConversationItem';
+export const TYPE_VERSION_CONVERSATION_ITEM = 3;
 
 // =============================================================================
 // Enums
@@ -40,7 +43,7 @@ export type ItemStatus = 'pending' | 'streaming' | 'complete' | 'error' | 'cance
 /**
  * ToolCallStatus provides finer-grained tool execution state.
  */
-export type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'error' | 'skipped';
+export type ToolCallStatus = 'pending' | 'executing' | 'pending_approval' | 'complete' | 'error' | 'skipped';
 
 /**
  * SystemKind categorizes system messages.
@@ -117,6 +120,10 @@ export interface AssistantTurn {
   max_turns?: number;
   /** Why generation stopped. */
   finish_reason?: string;
+  /** Raw LLM request payload (for debugging). */
+  raw_request?: string;
+  /** Raw LLM response payload (for debugging). */
+  raw_response?: string;
 }
 
 /**
@@ -143,6 +150,8 @@ export interface ToolCallItem {
   error?: ToolCallError;
   /** Execution duration in milliseconds. */
   duration_ms?: number;
+  /** Arbitrary metadata attached to this tool call. */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -189,6 +198,10 @@ export interface TurnMetrics {
   duration_ms?: number;
   /** Model used for this turn. */
   model?: string;
+  /** Provider that served this turn. */
+  provider?: string;
+  /** Provider-specific request ID for tracing. */
+  request_id?: string;
 }
 
 // =============================================================================
@@ -466,6 +479,8 @@ export function getToolCallStatusIndicator(status: ToolCallStatus): {
       return { icon: '○', color: 'text-slate-400', bgColor: 'bg-slate-500/20', animate: true };
     case 'executing':
       return { icon: '◐', color: 'text-blue-400', bgColor: 'bg-blue-500/20', animate: true };
+    case 'pending_approval':
+      return { icon: '⏸', color: 'text-amber-400', bgColor: 'bg-amber-500/20', animate: true };
     case 'complete':
       return { icon: '✓', color: 'text-green-400', bgColor: 'bg-green-500/20', animate: false };
     case 'error':
