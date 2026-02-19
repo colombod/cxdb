@@ -7,7 +7,7 @@
 //! Events originate from the binary protocol handler and are fanned out to all
 //! connected HTTP SSE clients.
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -226,9 +226,12 @@ impl EventSubscriber {
     }
 }
 
+/// Maximum number of events buffered per SSE subscriber before events are dropped.
+const SUBSCRIBER_CHANNEL_BOUND: usize = 4096;
+
 /// Thread-safe event bus for broadcasting store events to SSE subscribers.
 pub struct EventBus {
-    subscribers: Arc<Mutex<Vec<Sender<StoreEvent>>>>,
+    subscribers: Arc<Mutex<Vec<SyncSender<StoreEvent>>>>,
 }
 
 impl EventBus {
@@ -240,8 +243,10 @@ impl EventBus {
     }
 
     /// Subscribe to events. Returns a subscriber that receives all future events.
+    /// The channel is bounded: if a subscriber falls behind by more than
+    /// SUBSCRIBER_CHANNEL_BOUND events, new events are dropped for that subscriber.
     pub fn subscribe(&self) -> EventSubscriber {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(SUBSCRIBER_CHANNEL_BOUND);
         let mut subs = self.subscribers.lock().unwrap();
         subs.push(tx);
         EventSubscriber { rx }
@@ -249,10 +254,22 @@ impl EventBus {
 
     /// Publish an event to all subscribers.
     /// Disconnected subscribers are automatically removed.
+    /// Slow subscribers that have a full buffer will have this event dropped (try_send).
     pub fn publish(&self, event: StoreEvent) {
         let mut subs = self.subscribers.lock().unwrap();
-        // Send to all, remove disconnected
-        subs.retain(|tx| tx.send(event.clone()).is_ok());
+        subs.retain(|tx| {
+            match tx.try_send(event.clone()) {
+                Ok(()) => true,
+                Err(mpsc::TrySendError::Full(_)) => {
+                    // Subscriber is too slow — drop the event but keep the subscriber
+                    true
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    // Subscriber gone — remove it
+                    false
+                }
+            }
+        });
     }
 
     /// Get the current number of subscribers.

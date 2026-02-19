@@ -270,7 +270,7 @@ pub struct FsRootsStats {
 
 /// Load and deserialize tree entries from the blob store.
 pub fn load_tree_entries(
-    blob_store: &mut BlobStore,
+    blob_store: &BlobStore,
     tree_hash: &[u8; 32],
 ) -> Result<Vec<TreeEntry>> {
     let bytes = blob_store.get(tree_hash)?;
@@ -368,7 +368,7 @@ fn parse_tree_entry(value: &Value) -> Result<TreeEntry> {
 /// Resolve a path to its tree hash (for directories) or blob hash (for files).
 /// Returns (hash, is_directory).
 pub fn resolve_path(
-    blob_store: &mut BlobStore,
+    blob_store: &BlobStore,
     root_hash: &[u8; 32],
     path: &str,
 ) -> Result<([u8; 32], bool)> {
@@ -416,7 +416,7 @@ pub fn resolve_path(
 
 /// Get a file's content by path from a filesystem snapshot.
 pub fn get_file_at_path(
-    blob_store: &mut BlobStore,
+    blob_store: &BlobStore,
     root_hash: &[u8; 32],
     path: &str,
 ) -> Result<(Vec<u8>, TreeEntry)> {

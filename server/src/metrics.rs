@@ -341,7 +341,7 @@ impl Metrics {
         buf.iter().rev().take(limit).cloned().collect()
     }
 
-    pub fn snapshot(&self, store: &mut Store, registry: &Registry) -> MetricsSnapshot {
+    pub fn snapshot(&self, store: &Store, registry: &Registry) -> MetricsSnapshot {
         let now = Utc::now();
         let uptime_seconds = self.start.elapsed().as_secs_f64();
 
@@ -432,7 +432,7 @@ impl Metrics {
 
     fn collect_stats(
         &self,
-        store: &mut Store,
+        store: &Store,
         registry: &Registry,
     ) -> (MemoryMetrics, StorageMetrics, ObjectMetrics) {
         let mut system = self.system.lock().unwrap();

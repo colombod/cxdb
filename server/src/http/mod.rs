@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,7 +27,7 @@ type HttpResponse = (u16, Response<std::io::Cursor<Vec<u8>>>);
 
 pub fn start_http(
     bind_addr: String,
-    store: Arc<Mutex<Store>>,
+    store: Arc<RwLock<Store>>,
     registry: Arc<Mutex<Registry>>,
     metrics: Arc<Metrics>,
     session_tracker: Arc<SessionTracker>,
@@ -54,7 +54,7 @@ pub fn start_http(
 
 fn handle_request(
     mut request: tiny_http::Request,
-    store: &Arc<Mutex<Store>>,
+    store: &Arc<RwLock<Store>>,
     registry: &Arc<Mutex<Registry>>,
     metrics: &Arc<Metrics>,
     session_tracker: &Arc<SessionTracker>,
@@ -217,14 +217,14 @@ fn handle_request(
                     .map(|v| v == "1")
                     .unwrap_or(false);
 
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 let contexts = store.list_recent_contexts(limit);
 
                 let contexts_json: Vec<JsonValue> = contexts
                     .iter()
                     .filter_map(|c| {
                         let obj = context_to_json(
-                            &mut store,
+                            &store,
                             session_tracker,
                             c.context_id,
                             include_provenance,
@@ -290,7 +290,7 @@ fn handle_request(
                 let client_tag = extract_http_client_tag(&request);
 
                 let head = {
-                    let mut store = store.lock().unwrap();
+                    let mut store = store.write().unwrap();
                     store.create_context(base_turn_id)?
                 };
 
@@ -323,7 +323,7 @@ fn handle_request(
                 let client_tag = extract_http_client_tag(&request);
 
                 let head = {
-                    let mut store = store.lock().unwrap();
+                    let mut store = store.write().unwrap();
                     store.create_context(base_turn_id)?
                 };
 
@@ -356,7 +356,7 @@ fn handle_request(
                 let client_tag = extract_http_client_tag(&request);
 
                 let head = {
-                    let mut store = store.lock().unwrap();
+                    let mut store = store.write().unwrap();
                     store.fork_context(base_turn_id)?
                 };
 
@@ -410,7 +410,7 @@ fn handle_request(
                 // Get live context IDs from session tracker
                 let live_contexts = session_tracker.get_live_context_ids();
 
-                let store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 match store.search_contexts(&query, &live_contexts, limit) {
                     Ok(result) => {
                         // Fetch full context details for matching IDs
@@ -431,10 +431,11 @@ fn handle_request(
                                 });
 
                                 // Add metadata if available (use cached data)
-                                if let Some(metadata) = store
-                                    .context_metadata_cache
-                                    .get(&context_id)
-                                    .and_then(|m| m.as_ref())
+                                let cached_meta = {
+                                    let cache = store.context_metadata_cache.lock().unwrap();
+                                    cache.get(&context_id).cloned().flatten()
+                                };
+                                if let Some(metadata) = cached_meta.as_ref()
                                 {
                                     if let Some(ref tag) = metadata.client_tag {
                                         obj["client_tag"] = JsonValue::String(tag.clone());
@@ -511,9 +512,9 @@ fn handle_request(
                     .map(|v| v == "1")
                     .unwrap_or(true);
 
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 let obj = context_to_json(
-                    &mut store,
+                    &store,
                     session_tracker,
                     context_id,
                     include_provenance,
@@ -555,7 +556,7 @@ fn handle_request(
                     .and_then(|v| v.parse::<u32>().ok())
                     .unwrap_or(256);
 
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 // Validate parent context exists
                 store.get_head(context_id)?;
 
@@ -571,7 +572,7 @@ fn handle_request(
                     .iter()
                     .filter_map(|child_id| {
                         context_to_json(
-                            &mut store,
+                            &store,
                             session_tracker,
                             *child_id,
                             include_provenance,
@@ -606,7 +607,7 @@ fn handle_request(
                     .parse()
                     .map_err(|_| StoreError::InvalidInput("invalid context_id".into()))?;
 
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 store.get_head(context_id)?;
                 let metadata = store.get_context_metadata(context_id);
 
@@ -674,7 +675,7 @@ fn handle_request(
 
                 let hash = blake3::hash(&payload_bytes);
                 let (record, metadata) = {
-                    let mut store = store.lock().unwrap();
+                    let mut store = store.write().unwrap();
                     store.append_turn(
                         context_id,
                         parent_turn_id,
@@ -791,7 +792,7 @@ fn handle_request(
                     include_unknown,
                 };
 
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 let head = store.get_head(context_id)?;
                 let t0 = Instant::now();
                 let turns = if before_turn_id == 0 {
@@ -940,9 +941,9 @@ fn handle_request(
                 ))
             }
             (Method::Get, ["v1", "metrics"]) => {
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 let registry = registry.lock().unwrap();
-                let snapshot = metrics.snapshot(&mut store, &registry);
+                let snapshot = metrics.snapshot(&store, &registry);
                 let bytes = serde_json::to_vec(&snapshot)
                     .map_err(|e| StoreError::InvalidInput(format!("json encode error: {e}")))?;
                 Ok((
@@ -983,7 +984,7 @@ fn handle_request(
                 let params = parse_query(url.query().unwrap_or(""));
                 let path = params.get("path").map(|s| s.as_str()).unwrap_or("");
 
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
 
                 // Get fs_root for this turn
                 let fs_root = store
@@ -1044,7 +1045,7 @@ fn handle_request(
                 let params = parse_query(url.query().unwrap_or(""));
                 let as_json = params.get("format").map(|s| s.as_str()) == Some("json");
 
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
 
                 // First try to get it as a file
                 match store.get_fs_file(turn_id, &path) {
@@ -1303,7 +1304,7 @@ fn write_sse_heartbeat<W: Write>(writer: &mut W) -> std::io::Result<()> {
 }
 
 fn context_to_json(
-    store: &mut Store,
+    store: &Store,
     session_tracker: &SessionTracker,
     context_id: u64,
     include_provenance: bool,

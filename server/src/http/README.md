@@ -34,6 +34,10 @@ The HTTP module provides a REST-ish JSON API for reading turns, managing context
 
 - `GET /v1/blobs/:hash` - Fetch blob by hash
 
+### Events
+
+- `GET /v1/events` - SSE event stream (Server-Sent Events)
+
 ### Health
 
 - `GET /health` - Health check
@@ -214,9 +218,33 @@ cargo test --package ai-cxdb-store --lib http
 cargo test --test http_integration
 ```
 
+## SSE Event Stream
+
+The `GET /v1/events` endpoint provides a Server-Sent Events stream for real-time
+updates. Events are broadcast to all connected SSE clients.
+
+**Event types:** `context_created`, `context_metadata_updated`, `context_linked`,
+`turn_appended`, `client_connected`, `client_disconnected`, `error_occurred`
+
+**Backpressure:** Each subscriber has a bounded channel of 4096 events. If a
+subscriber falls behind (slow network, paused consumer), events are dropped for
+that subscriber rather than accumulating unbounded memory. Disconnected
+subscribers are removed automatically.
+
+**Heartbeat:** A `:heartbeat` comment is sent every 20 seconds to keep the
+connection alive.
+
+## Concurrency
+
+Read-only endpoints (`GET /v1/contexts`, `GET /v1/contexts/:id/turns`,
+`GET /v1/contexts/search`, etc.) acquire a shared read lock on the store and can
+serve multiple requests concurrently. Write endpoints (`POST .../append`,
+`POST .../create`, `POST .../fork`) acquire an exclusive write lock.
+
 ## Performance
 
 **Typical latencies:**
+
 - GET /v1/contexts/:id/turns (10 turns, typed): ~5ms
 - POST /v1/contexts/:id/append: ~2ms
 - GET /v1/blobs/:hash: ~1ms

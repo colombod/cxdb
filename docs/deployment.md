@@ -50,6 +50,9 @@ Internet
 | `CXDB_ENABLE_METRICS` | `false` | Enable Prometheus metrics on :9011 |
 | `CXDB_MAX_BLOB_SIZE` | `10485760` | Max blob size (10MB) |
 | `CXDB_COMPRESSION_LEVEL` | `3` | Zstd compression level (1-22) |
+| `CXDB_MAX_CONNECTIONS` | `512` | Max concurrent binary protocol connections (0 = unlimited) |
+| `CXDB_CONNECTION_READ_TIMEOUT_SECS` | `300` | Idle read timeout per connection (seconds) |
+| `CXDB_CONNECTION_WRITE_TIMEOUT_SECS` | `30` | Write timeout per connection (seconds) |
 
 **Gateway (Go):**
 

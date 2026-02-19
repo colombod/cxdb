@@ -45,7 +45,7 @@ The turn store manages the Turn DAG - an immutable directed acyclic graph where 
 
 ### Turn Log (`turns.log`)
 
-Fixed-size turn records (104 bytes each):
+Fixed-size turn records (80 bytes each):
 
 ```rust
 TurnRecordV1 {
@@ -137,12 +137,18 @@ println!("Appended turn {} at depth {}", turn.turn_id, turn.depth);
 ```
 
 **Atomicity:**
+
 1. Allocate unique `turn_id` (atomic increment)
 2. Resolve parent (if parent_turn_id == 0, use context head)
-3. Write turn record to `turns.log`
-4. Write metadata to `turns.meta`
-5. Update context head in `heads.tbl`
-6. Update in-memory index
+3. Write turn record to `turns.log` + `sync_all()`
+4. Write index entry to `turns.idx` + `sync_all()`
+5. Write metadata to `turns.meta` + `sync_all()`
+6. Update context head in `heads.tbl` + `sync_all()`
+7. Update in-memory index
+
+All file writes are followed by `sync_all()` (fsync) to ensure data is durable
+on disk before the operation returns. This guarantees that acknowledged writes
+survive power loss.
 
 ### Getting Last N Turns
 
@@ -207,9 +213,10 @@ let new_head = store.get_head(context_id)?;
 ```
 
 **Concurrency:**
-- Per-context mutex guards head updates
-- Different contexts can be updated concurrently
-- Same context updates are serialized
+
+- The parent `Store` uses a `RwLock`: reads are shared, writes are exclusive
+- Head updates happen under the write lock
+- Multiple readers can call `get_head()`, `get_last()` concurrently
 
 ## Crash Recovery
 
@@ -296,26 +303,20 @@ turn_1 → turn_2 → turn_3 (context 1)
 
 ## Thread Safety
 
-**Per-context locking:**
-
-```rust
-use std::sync::Mutex;
-use std::collections::HashMap;
-
-struct TurnStore {
-    contexts: HashMap<u64, Mutex<ContextState>>,
-    // ...
-}
-```
+The `TurnStore` is accessed through the parent `Store` which is guarded by a
+`RwLock`. Read-only operations (`get_head`, `get_last`, `get_turn`,
+`get_turn_meta`, `list_recent_contexts`) take `&self` and run concurrently under
+a shared read lock. Write operations (`append_turn`, `create_context`) take
+`&mut self` and require the exclusive write lock.
 
 **Concurrent operations:**
 
-```
-Thread 1: append to context 1   │ OK (different context)
-Thread 2: append to context 2   │
+```text
+Thread 1 (read):  get_last(ctx=1)     │ OK (shared read lock)
+Thread 2 (read):  get_last(ctx=2)     │
 
-Thread 1: append to context 1   │ Serialized (same context)
-Thread 2: append to context 1   │ (waits for lock)
+Thread 3 (write): append_turn(ctx=1)  │ Exclusive (waits for readers)
+Thread 4 (read):  get_head(ctx=2)     │ Waits for write to finish
 ```
 
 ## Example Usage
@@ -399,7 +400,7 @@ Inspect files:
 ```bash
 # Turn count
 stat -c%s data/turns/turns.log
-# Divide by 104 (record size)
+# Divide by 80 (record size)
 
 # Context count
 grep -c "^" data/turns/heads.tbl

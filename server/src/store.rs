@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+use std::sync::Mutex;
 
 use blake3::Hasher;
 use rmpv::Value;
@@ -92,7 +93,8 @@ pub struct Store {
     pub fs_roots: FsRootsIndex,
     /// Cache of context metadata, populated lazily from first turn.
     /// None value means we checked but found no metadata.
-    pub context_metadata_cache: HashMap<u64, Option<ContextMetadata>>,
+    /// Uses interior mutability so reads can populate the cache without &mut self.
+    pub context_metadata_cache: Mutex<HashMap<u64, Option<ContextMetadata>>>,
     /// Secondary indexes for CQL queries.
     secondary_indexes: SecondaryIndexes,
 }
@@ -103,7 +105,7 @@ impl Store {
             blob_store: BlobStore::open(&dir.join("blobs"))?,
             turn_store: TurnStore::open(&dir.join("turns"))?,
             fs_roots: FsRootsIndex::open(&dir.join("fs"))?,
-            context_metadata_cache: HashMap::new(),
+            context_metadata_cache: Mutex::new(HashMap::new()),
             secondary_indexes: SecondaryIndexes::new(),
         };
 
@@ -124,26 +126,29 @@ impl Store {
         }
 
         // Build secondary indexes from the cache
-        self.secondary_indexes
-            .build_from_cache(&self.context_metadata_cache, &heads);
+        let cache = self.context_metadata_cache.lock().unwrap();
+        self.secondary_indexes.build_from_cache(&cache, &heads);
     }
 
     /// Get cached context metadata, loading from first turn if not cached.
-    pub fn get_context_metadata(&mut self, context_id: u64) -> Option<ContextMetadata> {
+    pub fn get_context_metadata(&self, context_id: u64) -> Option<ContextMetadata> {
         // Check cache first
-        if let Some(cached) = self.context_metadata_cache.get(&context_id) {
-            return cached.clone();
+        {
+            let cache = self.context_metadata_cache.lock().unwrap();
+            if let Some(cached) = cache.get(&context_id) {
+                return cached.clone();
+            }
         }
 
-        // Try to load from first turn (depth=0)
+        // Try to load from first turn (cache miss)
         let metadata = self.load_context_metadata(context_id);
-        self.context_metadata_cache
-            .insert(context_id, metadata.clone());
+        let mut cache = self.context_metadata_cache.lock().unwrap();
+        cache.insert(context_id, metadata.clone());
         metadata
     }
 
     /// Load context metadata from the first turn of a context.
-    fn load_context_metadata(&mut self, context_id: u64) -> Option<ContextMetadata> {
+    fn load_context_metadata(&self, context_id: u64) -> Option<ContextMetadata> {
         // Get the first turn (depth=0) for this context
         let first_turn = self.turn_store.get_first_turn(context_id).ok()?;
         let payload = self.blob_store.get(&first_turn.payload_hash).ok()?;
@@ -162,9 +167,8 @@ impl Store {
         // Only extract once: on the first append to this context.
         // The cache starts empty, so the first append always triggers extraction.
         // For new contexts this is depth=0; for forked contexts this is depth=N+1.
-        if let std::collections::hash_map::Entry::Vacant(e) =
-            self.context_metadata_cache.entry(context_id)
-        {
+        let mut cache = self.context_metadata_cache.lock().unwrap();
+        if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(context_id) {
             let metadata = extract_context_metadata(payload);
             e.insert(metadata.clone());
             metadata
@@ -256,7 +260,7 @@ impl Store {
     }
 
     pub fn get_last(
-        &mut self,
+        &self,
         context_id: u64,
         limit: u32,
         include_payload: bool,
@@ -280,7 +284,7 @@ impl Store {
     }
 
     pub fn get_before(
-        &mut self,
+        &self,
         context_id: u64,
         before_turn_id: u64,
         limit: u32,
@@ -306,7 +310,7 @@ impl Store {
         Ok(out)
     }
 
-    pub fn get_blob(&mut self, hash: &[u8; 32]) -> Result<Vec<u8>> {
+    pub fn get_blob(&self, hash: &[u8; 32]) -> Result<Vec<u8>> {
         self.blob_store.get(hash)
     }
 
@@ -462,14 +466,14 @@ impl Store {
     }
 
     /// List entries at a path in the filesystem snapshot for a turn.
-    pub fn list_fs_entries(&mut self, turn_id: u64, path: &str) -> Result<Vec<TreeEntry>> {
+    pub fn list_fs_entries(&self, turn_id: u64, path: &str) -> Result<Vec<TreeEntry>> {
         let fs_root = self
             .fs_roots
             .get_inherited(turn_id, &self.turn_store)
             .ok_or_else(|| StoreError::NotFound("no fs snapshot for turn".into()))?;
 
         let (tree_hash, is_dir) =
-            crate::fs_store::resolve_path(&mut self.blob_store, &fs_root, path)?;
+            crate::fs_store::resolve_path(&self.blob_store, &fs_root, path)?;
 
         if !is_dir {
             return Err(StoreError::InvalidInput(format!(
@@ -477,20 +481,20 @@ impl Store {
             )));
         }
 
-        crate::fs_store::load_tree_entries(&mut self.blob_store, &tree_hash)
+        crate::fs_store::load_tree_entries(&self.blob_store, &tree_hash)
     }
 
     /// Get file content at a path in the filesystem snapshot for a turn.
-    pub fn get_fs_file(&mut self, turn_id: u64, path: &str) -> Result<(Vec<u8>, TreeEntry)> {
+    pub fn get_fs_file(&self, turn_id: u64, path: &str) -> Result<(Vec<u8>, TreeEntry)> {
         let fs_root = self
             .fs_roots
             .get_inherited(turn_id, &self.turn_store)
             .ok_or_else(|| StoreError::NotFound("no fs snapshot for turn".into()))?;
 
-        crate::fs_store::get_file_at_path(&mut self.blob_store, &fs_root, path)
+        crate::fs_store::get_file_at_path(&self.blob_store, &fs_root, path)
     }
 
-    pub fn stats(&mut self) -> StoreStats {
+    pub fn stats(&self) -> StoreStats {
         let blob_stats = self.blob_store.stats();
         let turn_stats = self.turn_store.stats();
         let fs_stats = self.fs_roots.stats();
@@ -514,7 +518,7 @@ impl Store {
 
     /// Compute the total size of all blobs referenced by filesystem snapshots.
     /// This traverses all unique filesystem root trees and sums the raw blob sizes.
-    fn compute_fs_content_bytes(&mut self) -> u64 {
+    fn compute_fs_content_bytes(&self) -> u64 {
         use std::collections::HashSet;
 
         let unique_roots = self.fs_roots.unique_roots();
@@ -534,7 +538,7 @@ impl Store {
 
     /// Recursively compute the size of all blobs in a tree.
     fn compute_tree_size(
-        &mut self,
+        &self,
         tree_hash: &[u8; 32],
         visited: &mut std::collections::HashSet<[u8; 32]>,
     ) -> u64 {
@@ -547,7 +551,7 @@ impl Store {
         let tree_size = self.blob_store.raw_len(tree_hash).unwrap_or(0) as u64;
 
         // Try to load and traverse tree entries
-        let entries = match crate::fs_store::load_tree_entries(&mut self.blob_store, tree_hash) {
+        let entries = match crate::fs_store::load_tree_entries(&self.blob_store, tree_hash) {
             Ok(e) => e,
             Err(_) => return tree_size, // Can't parse tree, just return its own size
         };
