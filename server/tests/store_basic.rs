@@ -90,7 +90,7 @@ fn data_persists_across_reopen() {
     }; // store dropped, files closed
 
     // Reopen the same directory — data should still be there.
-    let mut store = Store::open(dir.path()).expect("reopen store");
+    let store = Store::open(dir.path()).expect("reopen store");
     let contexts = store.list_recent_contexts(100);
     assert!(
         !contexts.is_empty(),

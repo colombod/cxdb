@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -32,6 +34,8 @@ pub struct BlobStore {
     pack_path: PathBuf,
     idx_path: PathBuf,
     pack_file: File,
+    /// Separate read-only handle for pread-based concurrent reads.
+    pack_read: File,
     idx_file: File,
     index: HashMap<[u8; 32], BlobIndexEntry>,
 }
@@ -49,6 +53,8 @@ impl BlobStore {
             .write(true)
             .open(&pack_path)?;
 
+        let pack_read = OpenOptions::new().read(true).open(&pack_path)?;
+
         let idx_file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -60,6 +66,7 @@ impl BlobStore {
             pack_path,
             idx_path,
             pack_file,
+            pack_read,
             idx_file,
             index: HashMap::new(),
         };
@@ -182,7 +189,7 @@ impl BlobStore {
         self.pack_file.write_all(&header)?;
         self.pack_file.write_all(&stored_bytes)?;
         self.pack_file.write_u32::<LittleEndian>(crc)?;
-        self.pack_file.flush()?;
+        self.pack_file.sync_all()?;
 
         // append to index
         let mut idx_entry = Vec::with_capacity(32 + 8 + 4 + 4 + 2 + 2);
@@ -194,7 +201,7 @@ impl BlobStore {
         idx_entry.write_u16::<LittleEndian>(0)?;
         self.idx_file.seek(SeekFrom::End(0))?;
         self.idx_file.write_all(&idx_entry)?;
-        self.idx_file.flush()?;
+        self.idx_file.sync_all()?;
 
         let entry = BlobIndexEntry {
             offset,
@@ -206,48 +213,69 @@ impl BlobStore {
         Ok(entry)
     }
 
-    pub fn get(&mut self, hash: &[u8; 32]) -> Result<Vec<u8>> {
+    /// Read a blob by hash. Uses pread (read_at) so this does not mutate
+    /// the file offset and can safely be called from &self.
+    pub fn get(&self, hash: &[u8; 32]) -> Result<Vec<u8>> {
         let entry = self
             .index
             .get(hash)
             .ok_or_else(|| StoreError::NotFound("blob".into()))?
             .clone();
 
-        self.pack_file.seek(SeekFrom::Start(entry.offset))?;
+        // Header: magic(4) + version(2) + codec(2) + raw_len(4) + stored_len(4) + hash(32) = 48 bytes
+        const HEADER_SIZE: usize = 4 + 2 + 2 + 4 + 4 + 32;
 
-        let magic = self.pack_file.read_u32::<LittleEndian>()?;
+        // Read header first, then validate it against the in-memory index before
+        // allocating and slicing payload buffers.
+        let mut header = [0u8; HEADER_SIZE];
+        self.read_at_exact(entry.offset, &mut header)?;
+
+        let mut cursor = std::io::Cursor::new(&header);
+        let magic = cursor.read_u32::<LittleEndian>()?;
         if magic != BLOB_MAGIC {
             return Err(StoreError::Corrupt("invalid blob magic".into()));
         }
-        let version = self.pack_file.read_u16::<LittleEndian>()?;
+        let version = cursor.read_u16::<LittleEndian>()?;
         if version != BLOB_VERSION {
             return Err(StoreError::Corrupt("unsupported blob version".into()));
         }
-        let codec_raw = self.pack_file.read_u16::<LittleEndian>()?;
-        let raw_len = self.pack_file.read_u32::<LittleEndian>()?;
-        let stored_len = self.pack_file.read_u32::<LittleEndian>()?;
+        let codec_raw = cursor.read_u16::<LittleEndian>()?;
+        let raw_len = cursor.read_u32::<LittleEndian>()?;
+        let stored_len = cursor.read_u32::<LittleEndian>()?;
         let mut stored_hash = [0u8; 32];
-        self.pack_file.read_exact(&mut stored_hash)?;
+        cursor.read_exact(&mut stored_hash)?;
 
         if &stored_hash != hash {
             return Err(StoreError::Corrupt("blob hash mismatch".into()));
         }
 
-        let mut stored_bytes = vec![0u8; stored_len as usize];
-        self.pack_file.read_exact(&mut stored_bytes)?;
-        let crc = self.pack_file.read_u32::<LittleEndian>()?;
+        if stored_len != entry.stored_len || raw_len != entry.raw_len {
+            return Err(StoreError::Corrupt(
+                "blob index/header length mismatch".into(),
+            ));
+        }
 
-        let mut header = Vec::with_capacity(4 + 2 + 2 + 4 + 4 + 32);
-        header.write_u32::<LittleEndian>(magic)?;
-        header.write_u16::<LittleEndian>(version)?;
-        header.write_u16::<LittleEndian>(codec_raw)?;
-        header.write_u32::<LittleEndian>(raw_len)?;
-        header.write_u32::<LittleEndian>(stored_len)?;
-        header.extend_from_slice(&stored_hash);
+        let body_offset = entry
+            .offset
+            .checked_add(HEADER_SIZE as u64)
+            .ok_or_else(|| StoreError::Corrupt("blob offset overflow".into()))?;
+        let body_len = (stored_len as usize)
+            .checked_add(4)
+            .ok_or_else(|| StoreError::Corrupt("blob length overflow".into()))?;
+        let mut body = vec![0u8; body_len];
+        self.read_at_exact(body_offset, &mut body)?;
 
+        let stored_bytes = &body[..stored_len as usize];
+        let crc_offset = stored_len as usize;
+        let crc = {
+            let mut c = std::io::Cursor::new(&body[crc_offset..crc_offset + 4]);
+            c.read_u32::<LittleEndian>()?
+        };
+
+        // Verify CRC over header + stored bytes
         let mut hasher = Hasher::new();
         hasher.update(&header);
-        hasher.update(&stored_bytes);
+        hasher.update(stored_bytes);
         let actual_crc = hasher.finalize();
         if crc != actual_crc {
             return Err(StoreError::Corrupt("blob crc mismatch".into()));
@@ -260,8 +288,8 @@ impl BlobStore {
         };
 
         let raw_bytes = match codec {
-            BlobCodec::None => stored_bytes,
-            BlobCodec::Zstd => zstd::decode_all(&stored_bytes[..])
+            BlobCodec::None => stored_bytes.to_vec(),
+            BlobCodec::Zstd => zstd::decode_all(stored_bytes)
                 .map_err(|e| StoreError::Corrupt(format!("zstd decode failed: {e}")))?,
         };
 
@@ -270,6 +298,22 @@ impl BlobStore {
         }
 
         Ok(raw_bytes)
+    }
+
+    /// Read exactly buf.len() bytes from the read handle at the given offset using pread.
+    fn read_at_exact(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let mut total_read = 0usize;
+        while total_read < buf.len() {
+            let n = self
+                .pack_read
+                .read_at(&mut buf[total_read..], offset + total_read as u64)
+                .map_err(StoreError::Io)?;
+            if n == 0 {
+                return Err(StoreError::Corrupt("unexpected EOF reading blob".into()));
+            }
+            total_read += n;
+        }
+        Ok(())
     }
 
     pub fn stats(&self) -> BlobStoreStats {

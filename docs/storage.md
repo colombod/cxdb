@@ -97,6 +97,21 @@ ContextHeadRecord {
 }
 ```
 
+## Durability
+
+All write operations use `sync_all()` (fsync) after each file write. This ensures
+data is flushed from the OS page cache to stable storage before the server
+acknowledges the write to the client. The sync order for an append is:
+
+1. `blobs.pack` + `blobs.idx` (blob data and index)
+2. `turns.log` (turn record)
+3. `turns.idx` (turn index)
+4. `turns.meta` (type metadata)
+5. `heads.tbl` (context head update)
+
+A crash at any point leaves files in a recoverable state: CRC checks on startup
+detect and truncate partial writes.
+
 ## Recovery
 
 On startup the store scans logs sequentially. If a trailing record fails CRC or is incomplete,

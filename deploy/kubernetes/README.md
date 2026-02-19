@@ -101,6 +101,8 @@ Edit `configmap.yaml` and update:
 - `GOOGLE_ALLOWED_DOMAIN` - Email domain for access control (e.g., "example.com")
 - `CXDB_LOG_LEVEL` - Set to "debug" for verbose logging (optional)
 - `CXDB_ENABLE_METRICS` - Set to "true" to enable Prometheus (optional)
+- `CXDB_MAX_CONNECTIONS` - Max concurrent binary protocol connections (default: 512)
+- `CXDB_CONNECTION_READ_TIMEOUT_SECS` - Idle connection timeout in seconds (default: 300)
 
 Apply the ConfigMap:
 

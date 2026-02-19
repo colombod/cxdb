@@ -102,14 +102,9 @@ Creates or opens:
 let data = b"Hello, world!";
 let hash = blake3::hash(data);
 
-// Put will compress and deduplicate
-let was_new = store.put(&hash, data)?;
-
-if was_new {
-    println!("New blob stored");
-} else {
-    println!("Blob already exists (deduplicated)");
-}
+// put_if_absent will compress and deduplicate
+let entry = store.put_if_absent(*hash.as_bytes(), data)?;
+println!("Stored: offset={}, raw_len={}", entry.offset, entry.raw_len);
 ```
 
 **Compression:**
@@ -121,13 +116,13 @@ if was_new {
 ```rust
 let hash: [u8; 32] = /* ... */;
 
-match store.get(&hash)? {
-    Some(data) => println!("Found: {} bytes", data.len()),
-    None => println!("Blob not found"),
-}
+let data = store.get(&hash)?;  // Returns Result<Vec<u8>>
+println!("Found: {} bytes", data.len());
 ```
 
-Returns decompressed bytes.
+Returns decompressed bytes or a `NotFound` error. Reads use `pread` (positional
+read) via a separate read-only file handle, so `get()` takes `&self` and
+multiple threads can read concurrently without contention.
 
 ### Checking Existence
 
@@ -147,14 +142,15 @@ The blob store automatically deduplicates identical content:
 let data1 = b"foo";
 let hash1 = blake3::hash(data1);
 
-store.put(&hash1, data1)?;  // Writes to pack file
-store.put(&hash1, data1)?;  // No-op (already exists)
+store.put_if_absent(*hash1.as_bytes(), data1)?;  // Writes to pack file
+store.put_if_absent(*hash1.as_bytes(), data1)?;  // No-op (already exists)
 ```
 
 **Thread safety:**
-- Uses sharded locks (16 shards by hash prefix)
-- Double-checked locking: check index, acquire lock, check again, write if missing
-- Safe under concurrent writes
+
+- Reads (`get`, `contains`, `raw_len`) take `&self` and are safe under concurrent access
+- Writes (`put_if_absent`) take `&mut self` and are serialized by the caller's write lock
+- Deduplication check is O(1) in the in-memory hash index
 
 ## Compression
 
@@ -194,7 +190,7 @@ let hash = blake3::hash(data);  // Hash before compression
 let compressed = zstd::encode(data, 3)?;
 
 // Store with original hash
-store.put(&hash, data)?;  // Handles compression internally
+store.put_if_absent(*hash.as_bytes(), data)?;  // Handles compression internally
 ```
 
 **Why BLAKE3?**
@@ -202,7 +198,11 @@ store.put(&hash, data)?;  // Handles compression internally
 - Secure: 256-bit output, collision-resistant
 - Deterministic: Same input always produces same hash
 
-## Crash Recovery
+## Durability and Crash Recovery
+
+All writes (`put_if_absent`) are followed by `sync_all()` (fsync) on both the
+pack file and the index file. This ensures data is on stable storage before the
+caller is notified of success.
 
 On startup, the store:
 
@@ -212,6 +212,7 @@ On startup, the store:
 4. Rebuilds if necessary
 
 **CRC verification:**
+
 - Each blob record has a CRC-32
 - On read, CRC is verified
 - Corrupted blobs return error (caller must handle)
@@ -247,7 +248,7 @@ use blob_store::{BlobStore, BlobCodec};
 use blake3;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Open store
+    // Open store (mut needed for writes, reads only need &self)
     let mut store = BlobStore::open(Path::new("./data/blobs"))?;
 
     // Prepare data
@@ -260,13 +261,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Compute hash (before compression)
     let hash = blake3::hash(&msgpack_bytes);
 
-    // Store (will compress internally)
-    let was_new = store.put(&hash, &msgpack_bytes)?;
-    println!("Stored: was_new={}", was_new);
+    // Store (will compress internally, requires &mut self)
+    let _entry = store.put_if_absent(*hash.as_bytes(), &msgpack_bytes)?;
+    println!("Stored blob");
 
-    // Retrieve
-    let retrieved = store.get(&hash)?
-        .expect("Blob should exist");
+    // Retrieve (uses pread, only needs &self)
+    let retrieved = store.get(hash.as_bytes())?;
 
     assert_eq!(retrieved, msgpack_bytes);
     println!("Retrieved: {} bytes", retrieved.len());

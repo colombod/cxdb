@@ -21,6 +21,11 @@ data:
   # Storage tuning
   CXDB_MAX_BLOB_SIZE: "10485760"  # 10MB
   CXDB_COMPRESSION_LEVEL: "3"     # Zstd level 1-22
+
+  # Connection limits
+  CXDB_MAX_CONNECTIONS: "512"                  # Max concurrent binary protocol connections
+  CXDB_CONNECTION_READ_TIMEOUT_SECS: "300"     # Idle connection timeout (seconds)
+  CXDB_CONNECTION_WRITE_TIMEOUT_SECS: "30"     # Write timeout (seconds)
 ---
 apiVersion: v1
 kind: ConfigMap

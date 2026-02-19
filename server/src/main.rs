@@ -3,8 +3,8 @@
 
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -24,6 +24,22 @@ use cxdb_server::protocol::{
 use cxdb_server::registry::Registry;
 use cxdb_server::s3_sync::{S3Sync, S3SyncConfig, S3SyncHandle};
 use cxdb_server::store::Store;
+
+struct ConnectionCounterGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl ConnectionCounterGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        Self { counter }
+    }
+}
+
+impl Drop for ConnectionCounterGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 fn main() -> Result<()> {
     // Create tokio runtime for async S3 operations
@@ -67,7 +83,7 @@ fn main() -> Result<()> {
         None
     };
 
-    let store = Arc::new(Mutex::new(Store::open(&config.data_dir)?));
+    let store = Arc::new(RwLock::new(Store::open(&config.data_dir)?));
     let registry = Arc::new(Mutex::new(Registry::open(
         &config.data_dir.join("registry"),
     )?));
@@ -97,23 +113,66 @@ fn main() -> Result<()> {
     listener
         .set_nonblocking(true)
         .expect("Cannot set non-blocking");
-    eprintln!("cxdb listening on {}", config.bind_addr);
+
+    let active_connections = Arc::new(AtomicUsize::new(0));
+    let max_connections = config.max_connections;
+    let read_timeout = if config.connection_read_timeout_secs > 0 {
+        Some(Duration::from_secs(config.connection_read_timeout_secs))
+    } else {
+        None
+    };
+    let write_timeout = if config.connection_write_timeout_secs > 0 {
+        Some(Duration::from_secs(config.connection_write_timeout_secs))
+    } else {
+        None
+    };
+
+    eprintln!(
+        "cxdb listening on {} (max_connections={}, read_timeout={}s, write_timeout={}s)",
+        config.bind_addr,
+        if max_connections == 0 { "unlimited".to_string() } else { max_connections.to_string() },
+        config.connection_read_timeout_secs,
+        config.connection_write_timeout_secs,
+    );
 
     // Accept loop with shutdown check
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, peer_addr)) => {
-                // Set blocking mode for client handling (listener is non-blocking for shutdown checks)
+                // Enforce connection limit
+                let current = active_connections.load(Ordering::Relaxed);
+                if max_connections > 0 && current >= max_connections {
+                    eprintln!(
+                        "rejecting connection from {}: at limit ({}/{})",
+                        peer_addr, current, max_connections
+                    );
+                    drop(stream);
+                    continue;
+                }
+
+                // Set blocking mode with timeouts
                 if let Err(e) = stream.set_nonblocking(false) {
                     eprintln!("failed to set blocking mode: {e}");
                     continue;
                 }
+                if let Err(e) = stream.set_read_timeout(read_timeout) {
+                    eprintln!("failed to set read timeout: {e}");
+                    continue;
+                }
+                if let Err(e) = stream.set_write_timeout(write_timeout) {
+                    eprintln!("failed to set write timeout: {e}");
+                    continue;
+                }
+
+                active_connections.fetch_add(1, Ordering::Relaxed);
+                let conn_counter = Arc::clone(&active_connections);
                 let store = Arc::clone(&store);
                 let metrics = Arc::clone(&metrics);
                 let session_tracker = Arc::clone(&session_tracker);
                 let event_bus = Arc::clone(&event_bus);
                 let peer_addr_str = peer_addr.to_string();
                 thread::spawn(move || {
+                    let _connection_guard = ConnectionCounterGuard::new(conn_counter);
                     if let Err(err) = handle_client(
                         stream,
                         store,
@@ -151,7 +210,7 @@ fn main() -> Result<()> {
 
 fn handle_client(
     mut stream: TcpStream,
-    store: Arc<Mutex<Store>>,
+    store: Arc<RwLock<Store>>,
     metrics: Arc<Metrics>,
     session_tracker: Arc<SessionTracker>,
     event_bus: Arc<EventBus>,
@@ -167,6 +226,13 @@ fn handle_client(
         let (header, payload) = match read_frame(&mut stream) {
             Ok(v) => v,
             Err(StoreError::Io(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(StoreError::Io(err))
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                eprintln!("connection timed out (idle): {peer_addr}");
+                break;
+            }
             Err(e) => return Err(e),
         };
 
@@ -205,7 +271,7 @@ fn handle_client(
                     client_tag_received = true;
                 }
                 let base_turn_id = parse_ctx_create(&payload)?;
-                let mut store = store.lock().unwrap();
+                let mut store = store.write().unwrap();
                 let head = store.create_context(base_turn_id)?;
                 // Associate context with this session
                 session_tracker.add_context(session_id, head.context_id);
@@ -229,7 +295,7 @@ fn handle_client(
                     client_tag_received = true;
                 }
                 let base_turn_id = parse_ctx_fork(&payload)?;
-                let mut store = store.lock().unwrap();
+                let mut store = store.write().unwrap();
                 let head = store.fork_context(base_turn_id)?;
                 // Associate forked context with this session
                 session_tracker.add_context(session_id, head.context_id);
@@ -248,7 +314,7 @@ fn handle_client(
             }
             x if x == MsgType::GetHead as u16 => {
                 let context_id = parse_get_head(&payload)?;
-                let store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 let head = store.get_head(context_id)?;
                 let resp =
                     encode_ctx_create_resp(head.context_id, head.head_turn_id, head.head_depth)?;
@@ -258,7 +324,7 @@ fn handle_client(
                 let req = parse_append_turn(&payload, header.flags)?;
                 let declared_type_id_clone = req.declared_type_id.clone();
                 let declared_type_version = req.declared_type_version;
-                let mut store = store.lock().unwrap();
+                let mut store = store.write().unwrap();
                 let (record, metadata) = store.append_turn(
                     req.context_id,
                     req.parent_turn_id,
@@ -318,14 +384,14 @@ fn handle_client(
             }
             x if x == MsgType::AttachFs as u16 => {
                 let req = parse_attach_fs(&payload)?;
-                let mut store = store.lock().unwrap();
+                let mut store = store.write().unwrap();
                 store.attach_fs(req.turn_id, req.fs_root_hash)?;
                 let resp = encode_attach_fs_resp(req.turn_id, &req.fs_root_hash)?;
                 Ok((MsgType::AttachFs as u16, resp))
             }
             x if x == MsgType::PutBlob as u16 => {
                 let req = parse_put_blob(&payload)?;
-                let mut store = store.lock().unwrap();
+                let mut store = store.write().unwrap();
                 // Verify hash matches
                 let actual_hash = blake3::hash(&req.data);
                 if actual_hash.as_bytes() != &req.hash {
@@ -338,7 +404,7 @@ fn handle_client(
             }
             x if x == MsgType::GetLast as u16 => {
                 let req = parse_get_last(&payload)?;
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 let items = store.get_last(req.context_id, req.limit, req.include_payload != 0)?;
                 metrics.record_get_last(op_start.elapsed());
                 let mut resp = Vec::new();
@@ -376,7 +442,7 @@ fn handle_client(
             }
             x if x == MsgType::GetBlob as u16 => {
                 let hash = parse_get_blob(&payload)?;
-                let mut store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 let bytes = store.get_blob(&hash)?;
                 metrics.record_get_blob(op_start.elapsed());
                 let mut resp = Vec::new();

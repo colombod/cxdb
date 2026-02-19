@@ -52,7 +52,7 @@ turn_1 (root, depth=1) → turn_2 (depth=2) → turn_3 (depth=3)
                                            ↘ turn_4 (depth=3, branch)
 ```
 
-**Turn Record** (fixed-size, 104 bytes):
+**Turn Record** (fixed-size, 80 bytes):
 
 ```rust
 TurnRecordV1 {
@@ -251,32 +251,50 @@ graph LR
 
 ## Concurrency Model
 
+**Store-Level RwLock:**
+
+- The `Store` is guarded by a `RwLock`, not a `Mutex`
+- Read operations (GetHead, GetLast, GetBlob, search, list contexts) acquire a shared read lock
+- Write operations (AppendTurn, CtxCreate, CtxFork, PutBlob) acquire an exclusive write lock
+- Multiple readers proceed concurrently; writers are serialized
+
 **TurnID Allocation:**
+
 - Single global atomic counter
 - Linearizable: each turn gets a unique, monotonic ID
 
-**Per-Context Head Updates:**
-- Per-context mutex guards head pointer updates
-- Append operations are serialized per context
-- Different contexts can append concurrently
+**Blob Reads (pread):**
+
+- `BlobStore::get()` uses `pread` (positional read) via a separate read-only file handle
+- This avoids seek/read mutation, allowing `&self` access under a shared read lock
+- Multiple threads can read different blobs concurrently without contention
 
 **Blob Deduplication:**
-- Index sharded by hash prefix (16 shards)
-- Double-checked locking: check index, lock shard, check again, write if missing
+
+- `put_if_absent()` checks the in-memory index first (O(1) hash lookup)
+- If missing, compresses and appends under the write lock
+
+**Connection Limits:**
+
+- Binary protocol connections are capped at `CXDB_MAX_CONNECTIONS` (default: 512)
+- Read/write timeouts prevent stalled clients from holding threads indefinitely
+- Connections beyond the limit are rejected immediately
+
+**SSE Event Bus:**
+
+- Event subscribers use bounded channels (4096 events max per subscriber)
+- `publish()` uses `try_send()`: slow subscribers have events dropped rather than accumulating unbounded memory
+- Disconnected subscribers are removed automatically on the next publish
 
 **Example Concurrency:**
 
 ```
-Thread 1: Append to context 1 → acquire lock(ctx1) → write turn → update head → release
-Thread 2: Append to context 2 → acquire lock(ctx2) → write turn → update head → release
-Thread 3: Append to context 1 → wait for lock(ctx1) → write turn → update head → release
-```
+Thread 1 (read):  get_last(ctx=1)    │ Concurrent (shared read lock)
+Thread 2 (read):  get_last(ctx=2)    │
+Thread 3 (read):  search("tag=foo")  │
 
-Blobs are deduplicated safely under contention:
-
-```
-Thread A: hash=abc → check index (miss) → lock shard(abc) → check again → write → unlock
-Thread B: hash=abc → check index (hit from Thread A) → return existing entry
+Thread 4 (write): append_turn(ctx=1) │ Exclusive (waits for readers to drain)
+Thread 5 (read):  get_blob(hash)     │ Waits for write to finish
 ```
 
 ## Performance Characteristics
@@ -302,7 +320,7 @@ Thread B: hash=abc → check index (hit from Thread A) → return existing entry
 - **Total: ~0.2ms per turn**
 
 **Storage Efficiency:**
-- Turn record: 104 bytes
+- Turn record: 80 bytes
 - Turn metadata: ~50 bytes (type_id + encoding)
 - Blob overhead: ~50 bytes (header + CRC)
 - Typical 10KB payload compresses to ~3KB (70% reduction)
@@ -339,10 +357,10 @@ Thread B: hash=abc → check index (hit from Thread A) → return existing entry
 - **Fast**: No seeks, pure sequential writes (~500 MB/s on SSD)
 - **Simple recovery**: Scan forward, truncate to last valid CRC
 
-### Why Per-Context Locks?
+### Why RwLock?
 
-- **Scalability**: N contexts can append concurrently
-- **Correctness**: Head updates are linearizable per context
+- **Read scalability**: Multiple readers proceed concurrently (reads dominate in practice)
+- **Correctness**: Writers get exclusive access for head updates and appends
 - **Simple**: No complex MVCC or optimistic concurrency
 
 ## Scalability Limits (v1)
@@ -355,7 +373,7 @@ Thread B: hash=abc → check index (hit from Thread A) → return existing entry
 
 **Not supported in v1:**
 - Distributed/replicated storage
-- Horizontal read scaling (single reader process)
+- Horizontal read scaling (concurrent reads within single process via RwLock, but single-node)
 - Sub-blob chunking for huge payloads (>1MB)
 
 See [Roadmap](https://github.com/strongdm/cxdb/blob/main/ROADMAP.md) for v2 features.

@@ -313,7 +313,7 @@ impl TurnStore {
             self.turns_idx.write_u64::<LittleEndian>(*turn_id)?;
             self.turns_idx.write_u64::<LittleEndian>(*offset)?;
         }
-        self.turns_idx.flush()?;
+        self.turns_idx.sync_all()?;
         Ok(())
     }
 
@@ -422,12 +422,12 @@ impl TurnStore {
         let offset = self.turns_log.seek(SeekFrom::End(0))?;
         let bytes = encode_turn_record(&record)?;
         self.turns_log.write_all(&bytes)?;
-        self.turns_log.flush()?;
+        self.turns_log.sync_all()?;
 
         self.turns_idx.seek(SeekFrom::End(0))?;
         self.turns_idx.write_u64::<LittleEndian>(turn_id)?;
         self.turns_idx.write_u64::<LittleEndian>(offset)?;
-        self.turns_idx.flush()?;
+        self.turns_idx.sync_all()?;
 
         // store meta
         let mut meta_bytes = Vec::new();
@@ -440,7 +440,7 @@ impl TurnStore {
         meta_bytes.write_u32::<LittleEndian>(uncompressed_len)?;
         self.turns_meta.seek(SeekFrom::End(0))?;
         self.turns_meta.write_all(&meta_bytes)?;
-        self.turns_meta.flush()?;
+        self.turns_meta.sync_all()?;
 
         self.turn_meta.insert(
             turn_id,
@@ -482,7 +482,7 @@ impl TurnStore {
         buf.write_u32::<LittleEndian>(crc)?;
         self.heads_tbl.seek(SeekFrom::End(0))?;
         self.heads_tbl.write_all(&buf)?;
-        self.heads_tbl.flush()?;
+        self.heads_tbl.sync_all()?;
         Ok(())
     }
 
