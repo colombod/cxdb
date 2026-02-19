@@ -25,6 +25,22 @@ use cxdb_server::registry::Registry;
 use cxdb_server::s3_sync::{S3Sync, S3SyncConfig, S3SyncHandle};
 use cxdb_server::store::Store;
 
+struct ConnectionCounterGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl ConnectionCounterGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        Self { counter }
+    }
+}
+
+impl Drop for ConnectionCounterGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 fn main() -> Result<()> {
     // Create tokio runtime for async S3 operations
     let rt =
@@ -156,6 +172,7 @@ fn main() -> Result<()> {
                 let event_bus = Arc::clone(&event_bus);
                 let peer_addr_str = peer_addr.to_string();
                 thread::spawn(move || {
+                    let _connection_guard = ConnectionCounterGuard::new(conn_counter);
                     if let Err(err) = handle_client(
                         stream,
                         store,
@@ -166,7 +183,6 @@ fn main() -> Result<()> {
                     ) {
                         eprintln!("connection error: {err}");
                     }
-                    conn_counter.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {

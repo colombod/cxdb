@@ -225,12 +225,12 @@ impl BlobStore {
         // Header: magic(4) + version(2) + codec(2) + raw_len(4) + stored_len(4) + hash(32) = 48 bytes
         const HEADER_SIZE: usize = 4 + 2 + 2 + 4 + 4 + 32;
 
-        // Read header + stored_bytes + crc(4) in one pread call
-        let total_read = HEADER_SIZE + entry.stored_len as usize + 4;
-        let mut buf = vec![0u8; total_read];
-        self.read_at_exact(&buf.len(), entry.offset, &mut buf)?;
+        // Read header first, then validate it against the in-memory index before
+        // allocating and slicing payload buffers.
+        let mut header = [0u8; HEADER_SIZE];
+        self.read_at_exact(entry.offset, &mut header)?;
 
-        let mut cursor = std::io::Cursor::new(&buf[..HEADER_SIZE]);
+        let mut cursor = std::io::Cursor::new(&header);
         let magic = cursor.read_u32::<LittleEndian>()?;
         if magic != BLOB_MAGIC {
             return Err(StoreError::Corrupt("invalid blob magic".into()));
@@ -249,16 +249,32 @@ impl BlobStore {
             return Err(StoreError::Corrupt("blob hash mismatch".into()));
         }
 
-        let stored_bytes = &buf[HEADER_SIZE..HEADER_SIZE + stored_len as usize];
-        let crc_offset = HEADER_SIZE + stored_len as usize;
+        if stored_len != entry.stored_len || raw_len != entry.raw_len {
+            return Err(StoreError::Corrupt(
+                "blob index/header length mismatch".into(),
+            ));
+        }
+
+        let body_offset = entry
+            .offset
+            .checked_add(HEADER_SIZE as u64)
+            .ok_or_else(|| StoreError::Corrupt("blob offset overflow".into()))?;
+        let body_len = (stored_len as usize)
+            .checked_add(4)
+            .ok_or_else(|| StoreError::Corrupt("blob length overflow".into()))?;
+        let mut body = vec![0u8; body_len];
+        self.read_at_exact(body_offset, &mut body)?;
+
+        let stored_bytes = &body[..stored_len as usize];
+        let crc_offset = stored_len as usize;
         let crc = {
-            let mut c = std::io::Cursor::new(&buf[crc_offset..crc_offset + 4]);
+            let mut c = std::io::Cursor::new(&body[crc_offset..crc_offset + 4]);
             c.read_u32::<LittleEndian>()?
         };
 
         // Verify CRC over header + stored bytes
         let mut hasher = Hasher::new();
-        hasher.update(&buf[..HEADER_SIZE]);
+        hasher.update(&header);
         hasher.update(stored_bytes);
         let actual_crc = hasher.finalize();
         if crc != actual_crc {
@@ -284,10 +300,10 @@ impl BlobStore {
         Ok(raw_bytes)
     }
 
-    /// Read exactly `len` bytes from the read handle at the given offset using pread.
-    fn read_at_exact(&self, len: &usize, offset: u64, buf: &mut [u8]) -> Result<()> {
+    /// Read exactly buf.len() bytes from the read handle at the given offset using pread.
+    fn read_at_exact(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         let mut total_read = 0usize;
-        while total_read < *len {
+        while total_read < buf.len() {
             let n = self
                 .pack_read
                 .read_at(&mut buf[total_read..], offset + total_read as u64)
