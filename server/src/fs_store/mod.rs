@@ -269,10 +269,7 @@ pub struct FsRootsStats {
 }
 
 /// Load and deserialize tree entries from the blob store.
-pub fn load_tree_entries(
-    blob_store: &BlobStore,
-    tree_hash: &[u8; 32],
-) -> Result<Vec<TreeEntry>> {
+pub fn load_tree_entries(blob_store: &BlobStore, tree_hash: &[u8; 32]) -> Result<Vec<TreeEntry>> {
     let bytes = blob_store.get(tree_hash)?;
     parse_tree_entries(&bytes)
 }

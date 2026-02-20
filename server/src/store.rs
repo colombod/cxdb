@@ -472,8 +472,7 @@ impl Store {
             .get_inherited(turn_id, &self.turn_store)
             .ok_or_else(|| StoreError::NotFound("no fs snapshot for turn".into()))?;
 
-        let (tree_hash, is_dir) =
-            crate::fs_store::resolve_path(&self.blob_store, &fs_root, path)?;
+        let (tree_hash, is_dir) = crate::fs_store::resolve_path(&self.blob_store, &fs_root, path)?;
 
         if !is_dir {
             return Err(StoreError::InvalidInput(format!(

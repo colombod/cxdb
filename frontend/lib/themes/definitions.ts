@@ -633,13 +633,13 @@ const sdmBrandColors: ThemeColors = {
 export const themes: Theme[] = [
   {
     id: 'sdm-brand',
-    name: 'SDM Brand',
+    name: 'Default',
     description: 'Teal and navy on cool gray',
     colors: sdmBrandColors,
   },
   {
     id: 'original',
-    name: 'Original',
+    name: 'Trope',
     description: 'Purple accent on blue-black background',
     colors: originalColors,
   },

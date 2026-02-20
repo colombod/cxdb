@@ -130,7 +130,11 @@ fn main() -> Result<()> {
     eprintln!(
         "cxdb listening on {} (max_connections={}, read_timeout={}s, write_timeout={}s)",
         config.bind_addr,
-        if max_connections == 0 { "unlimited".to_string() } else { max_connections.to_string() },
+        if max_connections == 0 {
+            "unlimited".to_string()
+        } else {
+            max_connections.to_string()
+        },
         config.connection_read_timeout_secs,
         config.connection_write_timeout_secs,
     );

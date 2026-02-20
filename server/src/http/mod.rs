@@ -435,8 +435,7 @@ fn handle_request(
                                     let cache = store.context_metadata_cache.lock().unwrap();
                                     cache.get(&context_id).cloned().flatten()
                                 };
-                                if let Some(metadata) = cached_meta.as_ref()
-                                {
+                                if let Some(metadata) = cached_meta.as_ref() {
                                     if let Some(ref tag) = metadata.client_tag {
                                         obj["client_tag"] = JsonValue::String(tag.clone());
                                     }
