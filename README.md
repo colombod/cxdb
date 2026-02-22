@@ -299,7 +299,7 @@ CXDB is configured via environment variables:
 | `CXDB_DATA_DIR` | `./data` | Storage directory |
 | `CXDB_BIND` | `127.0.0.1:9009` | Binary protocol bind address |
 | `CXDB_HTTP_BIND` | `127.0.0.1:9010` | HTTP gateway bind address |
-| `CXDB_LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
+| `CXDB_LOG_LEVEL` | `warning` | Log level (debug, info, warning, error) |
 | `CXDB_ENABLE_METRICS` | `false` | Enable Prometheus metrics |
 
 See [docs/deployment.md](docs/deployment.md) for production configuration.
