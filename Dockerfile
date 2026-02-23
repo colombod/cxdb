@@ -82,11 +82,11 @@ ENV CXDB_BIND=0.0.0.0:9009
 ENV CXDB_HTTP_BIND=127.0.0.1:9010
 
 # Expose nginx port
-EXPOSE 80
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost/v1/contexts?limit=1 || exit 1
+    CMD curl -f http://localhost:8080/v1/contexts?limit=1 || exit 1
 
 # Run supervisor
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
